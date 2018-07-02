@@ -1,0 +1,264 @@
+import org.gradle.api.internal.artifacts.publish.ArchivePublishArtifact
+import org.gradle.api.internal.java.JavaLibrary
+import org.ultramine.gradle.task.ReobfTask
+import org.ultramine.gradle.task.SideSplitTask
+import org.ultramine.gradle.task.SpeicialClassTransformTask
+
+apply plugin: 'java'
+apply plugin: 'maven-publish'
+apply plugin: 'eclipse'
+apply plugin: 'idea'
+
+sourceCompatibility = '1.8'
+targetCompatibility = '1.8'
+
+compileJava.options.encoding = 'UTF-8'
+if(compile_incremental == "true")
+	compileJava.options.incremental = true
+
+group = project_group
+version = (concat_mc_version_to=='version' ? (minecraft_version+'-') : '') + computeVersion()
+
+repositories {
+	maven {
+		name 'forge'
+		url 'http://files.minecraftforge.net/maven'
+	}
+	mavenCentral()
+	maven {
+		name 'sonatypeSnapshot'
+		url 'https://oss.sonatype.org/content/repositories/snapshots/'
+	}
+	maven {
+		name 'minecraft'
+		url 'https://libraries.minecraft.net/'
+	}
+	maven {
+		name 'ultramine'
+		url 'http://maven.ultramine.ru/'
+	}
+	maven {
+		name = 'sponge'
+		url = 'http://repo.spongepowered.org/maven'
+	}
+	maven { url 'http://maven.sk89q.com/repo/' }
+	maven { url 'http://nexus.hc.to/content/repositories/pub_releases' }
+	maven {
+		name 'ultramine_local'
+		url 'file://G:/WorkSpace/minecraft development/maven/'
+	}
+}
+
+configurations {
+	compilePkg
+	compile.extendsFrom compilePkg
+	runtimePkg
+	runtime.extendsFrom runtimePkg
+
+	allPkg.setExtendsFrom([compilePkg, runtimePkg])
+}
+
+dependencies {
+//	compileCommon 'org.ultramine.core:ultramine_core-1.7.10:0.2.0-beta.1'
+	compile 'org.ultramine.core:ultramine_core-1.7.10:0.2.0-indev'
+
+	compilePkg('org.spongepowered:mixin:0.5.14-SNAPSHOT') {
+		exclude module: 'launchwrapper'
+		exclude module: 'guava'
+		exclude module: 'gson'
+		exclude module: 'commons-io'
+		exclude module: 'commons-codec'
+		exclude module: 'asm-commons'
+	}
+	compilePkg 'commons-lang:commons-lang:2.6'
+	compilePkg 'org.avaje:ebean:2.7.3'
+	compilePkg('net.md-5:SpecialSource:1.7.3') {
+		exclude module: 'guava'
+		exclude module: 'jopt-simple'
+		exclude module: 'asm-debug-all'
+	}
+
+	runtimePkg files('lib/guava-10-remapped.jar')
+	runtimePkg('com.googlecode.json-simple:json-simple:1.1.1') {
+		exclude module: 'junit'
+	}
+	runtimePkg 'org.xerial:sqlite-jdbc:3.8.11.2'
+
+	runtime 'mysql:mysql-connector-java:5.1.31'
+	compileOnly ('net.milkbowl.vault:VaultAPI:1.6') { transitive = false  }
+}
+
+ext.mixinSrg = file("$buildDir/mixin/mcp2srg.srg")
+ext.mixinNotch = file("$buildDir/mixin/mcp2notch.srg")
+ext.mixinRefmap = file("$buildDir/mixin/mixin.umbukkit.refmap.json")
+mixinSrg.parentFile.mkdirs()
+tasks.compileJava.options.compilerArgs += [
+		"-AreobfSrgFile=conf/mcp2srg.srg",
+		"-AreobfNotchSrgFile=conf/mcp2notch.srg",
+		"-AoutSrgFile=${mixinSrg.canonicalPath}",
+		"-AoutNotchSrgFile=${mixinNotch.canonicalPath}",
+		"-AoutRefMapFile=${mixinRefmap.canonicalPath}"
+]
+
+task injectVersion(type: SpeicialClassTransformTask) {
+	dependsOn tasks.compileJava
+	inputDir = tasks.compileJava.destinationDir
+//	replace {
+//		replaceIn 'org.ultramine.mods.privreg.PrivateRegions'
+//		replace '@version@', version
+//	}
+}
+
+task reobf(type: ReobfTask) {
+	dependsOn tasks.compileJava, tasks.injectVersion
+	classpath = sourceSets.main.compileClasspath;
+	addSrg('conf/mcp2srg.srg')
+	addSrg('conf/bukkit.srg')
+	addSrg(mixinSrg)
+	inputDir = tasks.compileJava.destinationDir
+	overrideInputDir = tasks.injectVersion.outputDir
+}
+
+task sidesplit(type: SideSplitTask) {
+	dependsOn tasks.reobf
+	inputDir = tasks.reobf.outputDir
+}
+
+task processServerResources(type: ProcessResources) {
+	from sourceSets.main.resources.srcDirs
+	from mixinRefmap
+	into new File(buildDir, 'resources_server')
+}
+
+task processClientResources(type: ProcessResources) {
+	from sourceSets.main.resources.srcDirs
+	into new File(buildDir, 'resources_client')
+	exclude 'org/ultramine/defaults'
+}
+
+task jar_server(type: Jar) {
+	dependsOn(tasks.sidesplit, tasks.processServerResources)
+	from fileTree(tasks.sidesplit.getServerClasses()), tasks.processServerResources
+	from configurations.allPkg.collect { it.isDirectory() ? it : zipTree(it) }
+	exclude 'META-INF/*', 'META-INF/maven/**', 'LICENSE.txt'
+	classifier = 'server'
+	manifest {
+		attributes(
+				'TweakClass': 'org.spongepowered.asm.launch.MixinTweaker',
+				'TweakOrder': '0',
+				'MixinConfigs': 'mixin.umbukkitimpl.json',
+				'FMLCorePlugin': 'org.ultramine.mods.bukkit.asm.UmBukkitCoremod',
+				'FMLCorePluginContainsFMLMod': 'true'
+		)
+	}
+}
+
+task jar_client(type: Jar) {
+	dependsOn(tasks.sidesplit, tasks.processClientResources)
+	from fileTree(tasks.sidesplit.getClientClasses()), tasks.processClientResources
+	classifier = 'client'
+}
+
+task jar_universal(type: Jar) {
+	dependsOn(tasks.reobf, tasks.processResources)
+	from tasks.reobf.getOutputDir(), tasks.processResources
+	classifier = 'universal'
+}
+
+jar {
+	classifier = 'dev'
+}
+
+task jar_source(type: Jar) {
+	from sourceSets.main.allSource
+	classifier = 'sources'
+}
+
+artifacts {
+	if(produce_universal_jar == 'true')	archives jar_universal
+	if(produce_server_jar == 'true')	archives jar_server
+	if(produce_client_jar == 'true')	archives jar_client
+}
+
+publishing {
+	publications {
+		if(publish_jars.contains('dev'))
+			mavenDevJar(MavenPublication) {
+				from new JavaLibrary(new ArchivePublishArtifact(tasks.jar), configurations.runtimeCommon.getAllDependencies())
+				artifacts.matching({it.classifier == "dev"}).all({it.classifier = null})
+				artifact tasks.jar_source
+			}
+		if(publish_jars.contains('server'))
+			mavenServerJar(MavenPublication) {
+				from new JavaLibrary(new ArchivePublishArtifact(tasks.jar_server), configurations.runtimeServer.getAllDependencies())
+				artifacts.matching({it.classifier == "server"}).all({it.classifier = null})
+				artifactId = project.name + '-server'
+			}
+	}
+	repositories {
+		if(project.hasProperty('publish_url') && !publish_url.isEmpty())
+			maven {
+				url publish_url
+			}
+	}
+}
+
+task dumpLibs(type: Copy) {
+	into "$buildDir/libs/libraries"
+	from configurations.runtime
+}
+
+String getGitDesc() {
+	def stdout = new ByteArrayOutputStream()
+	exec {
+		commandLine 'git', 'describe', '--tags', '--long'
+		standardOutput = stdout
+		errorOutput = stdout
+	}.rethrowFailure().assertNormalExitValue()
+	return stdout.toString().trim()
+}
+
+String computeVersion() {
+	if(project.hasProperty('override_version'))
+		return override_version
+
+	String mmversion; // major.minor
+	String commit;
+	try {
+		String[] parts = getGitDesc().split('-')
+		if(parts.length != 3) throw new GradleException('no git tags found')
+		if(!parts[0].startsWith('v')) throw new GradleException('last git tag is not a version')
+		mmversion = parts[0].substring(1) //removing 'v'
+		commit = parts[2].substring(1) //removing 'g'
+	} catch (Exception e) {
+		if(release_type != 'indev') throw e
+		return 'indev'
+	}
+
+	if(release_type != 'stable') {
+		int ind = mmversion.lastIndexOf('.')
+		mmversion = mmversion.substring(0, ind+1) + ((mmversion.substring(ind+1) as int) + 1) + '.0-' + release_type
+	}
+
+	int revision = 0;
+	if(project.hasProperty('override_revision')) {
+		revision = override_revision as int
+	} else if(release_type != 'indev' || project.hasProperty('increment_revision')) {
+		File verfile = file("$buildDir/versions/$mmversion")
+		String filetext;
+		if(verfile.exists() && !(filetext = verfile.getText().trim()).isEmpty()) {
+			String[] fileparts = filetext.split(':')
+			if(fileparts.length != 2) throw new GradleException('Version file is corrupted: ' + verfile.getAbsolutePath())
+			revision = fileparts[1] as int;
+			if(!commit.equals(fileparts[0]) || project.hasProperty('increment_revision')) {
+				revision++;
+				verfile.write(commit+':'+revision)
+			}
+		} else {
+			verfile.getParentFile().mkdirs()
+			verfile.write(commit+':0')
+		}
+	}
+
+	return (revision > 0 || release_type == 'stable') ? (mmversion+'.'+revision) : mmversion;
+}

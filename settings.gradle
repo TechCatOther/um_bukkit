@@ -1,0 +1,3 @@
+rootProject.name = project_name + (concat_mc_version_to=='name' ? ('-'+minecraft_version) : '')
+
+includeBuild('../ultramine_core')
